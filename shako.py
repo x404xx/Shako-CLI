@@ -1,10 +1,8 @@
-import asyncio
-import base64
-import hashlib
-import json
-import os
-import uuid
+from asyncio import run
+from base64 import urlsafe_b64encode
+from json import dumps, loads
 from textwrap import dedent
+from uuid import uuid4
 
 import websockets
 from rich.console import Console
@@ -26,6 +24,10 @@ class ShakoChatbot:
     """
 
     def __init__(self):
+        self.console = Console()
+        self.websocket = None
+        self.chat_id = None
+        self.conversation = []
         self.uri = 'wss://api.shako.ai/api/chat'
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/113.0',
@@ -35,72 +37,84 @@ class ShakoChatbot:
             'Sec-WebSocket-Key': self.web_key(),
             'Connection': 'Upgrade',
         }
-        self.clear = lambda: os.system('cls' if os.name == 'nt' else 'clear')
-        self.console = Console()
-        self.websocket = None
-        self.chat_id = None
 
     def web_key(self):
-        key = base64.b64encode(uuid.uuid4().bytes).decode('utf-8')
-        return base64.b64encode(hashlib.sha1(key.encode('utf-8')).digest()).decode('utf-8')
+        return urlsafe_b64encode(uuid4().bytes).decode('utf-8')
 
-    def get_query(self, prompt: str):
+    def get_query(
+        self, prompt
+        ):
+
         print(prompt, end='')
         return '/n'.join(iter(input, ''))
 
+    async def process_response(
+        self, response
+        ):
+
+        result = ''
+        while True:
+            response_data = loads(response)
+            content = response_data.get('content')
+            if content:
+                result += content
+            response_type = response_data.get('type')
+            if response_type == 'end':
+                break
+            response = await self.websocket.recv()
+
+        return result.strip(), response_data.get('chat_id')
+
+    async def send_initial_data(
+        self, initial_data
+        ):
+
+        await self.websocket.send(dumps(initial_data))
+        response = await self.websocket.recv()
+        result, chat_id = await self.process_response(response)
+        return result, chat_id
+
+    async def initial_data(
+        self, query
+        ):
+
+        return {
+            'chat_id': str(uuid4()) if self.chat_id is None else self.chat_id,
+            'metadata': {},
+            'prompt': self.conversation + [{'content': query, 'role': 'user'}]
+        }
+
     async def connect(self):
-        conversation = []
         while True:
             query = self.get_query(f'{Colors.GREEN}You{Colors.END} : ').lower()
-
             if query == '!exit':
                 break
             elif query == '!clear':
-                self.clear()
+                self.console.clear()
                 print(dedent(self.OPTIONS))
-                continue
             elif query == '!new':
-                self.chat_id = None
-                self.clear()
+                self.console.clear()
                 print(dedent(self.OPTIONS))
-                conversation = []
-                continue
+                self.chat_id = None
+                self.conversation = []
+            else:
+                initial_data = await self.initial_data(query)
+                with self.console.status("[bold blue]Please wait! Shako is thinking..[/bold blue]", spinner='point'):
+                    async with websockets.connect(self.uri, extra_headers=self.headers) as self.websocket:
+                        result, chat_id = await self.send_initial_data(initial_data)
+                        self.console.print(Markdown(result, code_theme='fruity'))
+                        self.chat_id = chat_id
+                        print()
 
-            initial_data = {
-                'chat_id': str(uuid.uuid4()) if self.chat_id is None else self.chat_id,
-                'metadata': {},
-                'prompt': conversation + [{'content': query, 'role': 'user'}]
-            }
-            with self.console.status("[bold blue]Please wait! Shako is thinking..[/bold blue]", spinner='point'):
-                async with websockets.connect(self.uri, extra_headers=self.headers) as self.websocket:
-                    await self.websocket.send(json.dumps(initial_data))
-
-                    result = []
-                    while True:
-                        response = await self.websocket.recv()
-                        response_data = json.loads(response)
-                        content = response_data.get('content')
-                        if content:
-                            result.append(content)
-
-                        response_type = response_data.get('type')
-                        if response_type == 'end':
-                            break
-
-                    joined_result = ''.join(result).strip()
-                    self.console.print(Markdown(joined_result, code_theme='fruity'))
-                    print()
-                    self.chat_id = response_data.get('chat_id')
-
-            conversation.extend([
-                {'content': query, 'role': 'user'},
-                {'content': joined_result, 'role': 'model'}
-            ])
+                        self.conversation.extend([
+                            {'content': query, 'role': 'user'},
+                            {'content': result, 'role': 'model'},
+                        ])
 
     def run(self):
-        self.clear()
+        self.console.clear()
         print(dedent(self.OPTIONS))
-        asyncio.run(self.connect())
+        run(self.connect())
 
 
 if __name__ == '__main__':
