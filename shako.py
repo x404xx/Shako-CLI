@@ -46,7 +46,7 @@ class ShakoChatbot:
         ):
 
         print(prompt, end='')
-        return '/n'.join(iter(input, ''))
+        return '\n'.join(iter(input, ''))
 
     async def process_response(
         self, response
